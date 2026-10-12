@@ -1,0 +1,35 @@
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local runtime data
+data/
+*.db
+*.db-shm
+*.db-wal
+logs/
+cache/
+exports/
+
+# Tauri / Rust
+src-tauri/target/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+!.env.example

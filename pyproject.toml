@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "v-maker-backend"
+version = "0.1.0"
+description = "Local-only FastAPI backend for V-Maker"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "pydantic>=2.9,<3.0",
+  "uvicorn[standard]>=0.30,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27,<1.0",
+  "pytest>=8.3,<9.0",
+]
+# 可选：安装后导出接口才能生成真实的剪映草稿。
+# 不装也能用——API 与界面都会如实回退到通用草稿包并说明原因。
+jianying = [
+  "pyJianYingDraft>=0.3.0,<0.4",
+]
+# 可选：自带一个真实的 ffmpeg 可执行文件，装了就不必再自己安装 FFmpeg 也能导出 MP4。
+# 不装也能用——设置 VMAKER_FFMPEG_PATH、或把 ffmpeg 放进 PATH 都可以；都没有时导出会如实回退。
+ffmpeg = [
+  "imageio-ffmpeg>=0.5",
+]
+
+[project.scripts]
+vmaker-backend = "backend.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+addopts = "-q"

@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>V-Maker UI probe</title>
+<style>body{margin:0;background:#1b1b1f;color:#eee;font:12px/1.6 monospace;padding:10px}iframe{position:absolute;left:0;top:0;border:0;background:white}pre{white-space:pre-wrap}</style></head>
+<body><pre id="report">running…</pre><div id="stage"></div><script>
+// Read-only UI exercise: never submits project creation/deletion or paid generation.
+// Examples: ?widths=320,420&heights=420&scenarios=新建向导·第4步
+// Machine result: window.__UI_PROBE_RESULT__, or JSON in #probe-result.
+window.addEventListener('error', event => publish({status:'failed',cases:[{scenario:'probe configuration/runtime',status:'failed',issues:[{kind:'fatal',detail:event.message}]}]}));
+const query = new URLSearchParams(location.search);
+function dimensions(key, defaults) {
+  if (!query.has(key)) return defaults;
+  const values = query.get(key).split(',').map(Number);
+  if (!values.length || values.some(n => !Number.isInteger(n) || n < 200 || n > 4000)) throw Error(`Invalid ${key}`);
+  return values;
+}
+const WIDTHS = dimensions('widths', [320,360,420,480,700,760,1000,1280]);
+const HEIGHTS = dimensions('heights', [420,560,760,900]);
+const ZOOM = Number(query.get('zoom') || 1); // CSS zoom stress test, not browser/device zoom.
+if (!Number.isFinite(ZOOM) || ZOOM < 0.5 || ZOOM > 3) throw Error('Invalid zoom');
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(test, label, timeout=8000) {
+  const start = performance.now();
+  while (performance.now()-start < timeout) { if (test()) return; await sleep(50); }
+  throw Error(`未进入预期状态: ${label}`);
+}
+function visible(el) {
+  if (!el || !el.isConnected || el.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
+  const win=el.ownerDocument.defaultView;
+  for(let n=el;n;n=n.parentElement) { const s=win.getComputedStyle(n); if(s.display==='none'||s.visibility==='hidden'||Number(s.opacity)===0) return false; }
+  const r=el.getBoundingClientRect(); return r.width>0.5 && r.height>0.5;
+}
+function click(el,label) {
+  if(!visible(el)||el.disabled) throw Error(`交互未命中或不可用: ${label}`);
+  el.click();
+}
+function byText(doc,text,root=doc) {
+  const candidates=[...root.querySelectorAll('button')].filter(n=>visible(n)&&(n.textContent||'').trim()===text);
+  if(candidates.length!==1) throw Error(`按钮定位不唯一/未命中: ${text} (${candidates.length})`);
+  click(candidates[0],text);
+}
+function byLabel(doc,label) { click(doc.querySelector(`[aria-label="${label}"]`),label); }
+const wizardTitles=['你想讲一个怎样的故事？','定义作品的观看体验','选择与你匹配的创作方式','准备好开拍了'];
+async function wizard(doc,step) {
+  byText(doc,'新建动画项目');
+  await until(()=>doc.querySelector('.wizard-page h3')?.textContent===wizardTitles[0],wizardTitles[0]);
+  if(step>0) {
+    for(const [selector,value,type] of [['.wizard-page input','布局探针：有效项目名称','HTMLInputElement'],['.wizard-page textarea','一只小猫在雨夜找到回家的路。','HTMLTextAreaElement']]) {
+      const el=doc.querySelector(selector); if(!el) throw Error(`缺少字段 ${selector}`);
+      const win=doc.defaultView;
+      Object.getOwnPropertyDescriptor(win[type].prototype,'value').set.call(el,value);
+      el.dispatchEvent(new win.Event('input',{bubbles:true}));
+      el.dispatchEvent(new win.Event('change',{bubbles:true}));
+    }
+    await sleep(100);
+  }
+  for(let i=1;i<=step;i++) {
+    byText(doc,'下一步',doc.querySelector('.create-modal'));
+    await until(()=>doc.querySelector('.wizard-page h3')?.textContent===wizardTitles[i],wizardTitles[i]);
+  }
+  // Required controls must be visible immediately, before any scrollIntoView can hide a defect.
+  const buttons=[...doc.querySelectorAll('.wizard-actions button')];
+  if(buttons.length!==2) throw Error('向导必须同时显示两个操作按钮');
+  for(const button of buttons) {
+    const r=button.getBoundingClientRect(),w=doc.defaultView;
+    const hit=doc.elementFromPoint((r.left+r.right)/2,(r.top+r.bottom)/2);
+    if(!visible(button)||r.left<0||r.right>w.innerWidth||r.top<0||r.bottom>w.innerHeight||!(hit===button||button.contains(hit))) throw Error(`向导初始按钮不可见: ${button.textContent}`);
+  }
+}
+// 加载中会渲染 .project-card.skeleton 占位卡片（没有文字、点了也不会有反应）。
+// 必须排除它们，否则探针会点到骨架卡然后报「打不开工作台」。
+const projectCards = doc => [...doc.querySelectorAll('.project-card:not(.skeleton)')];
+async function openProject(doc) {
+  await until(()=>projectCards(doc).length>0,'至少一个项目（请预先准备测试项目）');
+  click(projectCards(doc)[0],'打开项目');
+  await until(()=>doc.querySelector('.workspace-nav'),'工作台导航');
+}
+async function workspace(doc,label) {
+  await openProject(doc);
+  if(label) click(doc.querySelector(`.workspace-nav button[aria-label="${label}"]`),label);
+  await until(()=>doc.querySelector('.workspace-nav [aria-current="page"]')?.getAttribute('aria-label')===(label||'项目概览'),`工作台 ${label||'项目概览'}`);
+}
+const SCENARIOS=[
+  {name:'首页',run:async d=>{await until(()=>d.querySelector('.home-main'),'首页内容');}},
+  ...wizardTitles.map((_,i)=>({name:i?`新建向导·第${i+1}步`:'新建向导',run:d=>wizard(d,i)})),
+  {name:'模型设置',run:async d=>{byLabel(d,'模型设置');await until(()=>d.querySelector('.settings-modal'),'模型设置弹层');}},
+  {name:'环境诊断',run:async d=>{byLabel(d,'模型设置');await until(()=>d.querySelector('.settings-modal'),'模型设置弹层');byText(d,'环境诊断',d.querySelector('.settings-modal'));await until(()=>d.querySelector('.diagnostics-modal #diagnostics-title')?.textContent==='环境诊断','环境诊断弹层');await until(()=>d.querySelector('.diagnostics-modal .diagnostic-jianying, .diagnostics-modal .diagnostic-error'),'诊断响应（成功或错误）');}}, 
+  {name:'模型设置·图像页',run:async d=>{byLabel(d,'模型设置');await until(()=>d.querySelector('.settings-modal'),'模型设置弹层');byText(d,'图像',d.querySelector('.settings-modal'));await until(()=>[...d.querySelectorAll('.settings-modal button')].some(b=>b.textContent.trim()==='图像'&&(b.getAttribute('aria-selected')==='true'||b.classList.contains('active'))),'图像页签激活');}},
+  {name:'项目菜单',run:async d=>{await until(()=>d.querySelector('[aria-label="项目菜单"]'),'项目菜单按钮');byLabel(d,'项目菜单');await until(()=>d.querySelector('[role="menu"]'),'项目菜单展开');}},
+  {name:'删除确认框',run:async d=>{await until(()=>d.querySelector('[aria-label="项目菜单"]'),'项目菜单按钮');byLabel(d,'项目菜单');await until(()=>d.querySelector('[role="menu"]'),'菜单展开');byText(d,'删除项目',d.querySelector('[role="menu"]'));await until(()=>d.querySelector('.confirm-dialog'),'删除确认框');}},
+  ...['项目概览','故事与剧本','项目圣经','分镜工作台','素材库','时间线','任务中心','成本预算','导出'].map(label=>({name:`工作台·${label==='项目概览'?'概览':label}`,run:d=>workspace(d,label)}))
+];
+// Additional read-only states: open dialogs, never confirm writes or generation.
+for (const label of ['语音','视频']) SCENARIOS.push({name:`模型设置·${label}页`,run:async d=>{byLabel(d,'模型设置');await until(()=>d.querySelector('.settings-modal'),'设置');byText(d,label,d.querySelector('.settings-modal'));}});
+SCENARIOS.push({name:'分镜·表格',run:async d=>{await workspace(d,'分镜工作台');await until(()=>d.querySelector('[aria-label="分镜视图"]'),'分镜内容');byText(d,'表格',d.querySelector('[aria-label="分镜视图"]'));await until(()=>d.querySelector('.shot-table'),'表格');}});
+SCENARIOS.push({name:'分镜·编辑抽屉',run:async d=>{await workspace(d,'分镜工作台');await until(()=>d.querySelector('.shot-card button[aria-label^="编辑"]'),'已有镜头');click(d.querySelector('.shot-card button[aria-label^="编辑"]'),'编辑镜头');await until(()=>d.querySelector('.shot-drawer'),'镜头抽屉');}});
+for(const label of ['重新生成计划','为全部镜头生成画面','生成配音','为全部镜头生成视频','批准全部镜头']) SCENARIOS.push({name:`分镜确认·${label}`,run:async d=>{await workspace(d,'分镜工作台');await until(()=>d.querySelector('.shot-card'),'镜头加载');byText(d,label,d.querySelector('.hero-actions'));await until(()=>d.querySelector('.confirm-dialog'),'确认框');}});
+for(const format of ['auto','mp4','portable_draft','jianying_draft']) SCENARIOS.push({name:`导出确认·${format}`,run:async d=>{await workspace(d,'导出');await until(()=>d.querySelector('.export-submit'),'导出表单');const radio=d.querySelector(`input[type="radio"][value="${format}"]`);click(radio?.closest('label'),format);await sleep(50);click(d.querySelector('.export-submit'),'打开导出确认');await until(()=>d.querySelector('.confirm-dialog'),'导出确认');}});
+SCENARIOS.push({name:'分镜·长标题抽屉',run:async d=>{await workspace(d,'分镜工作台');await until(()=>d.querySelector('.shot-card button[aria-label^="编辑"]'),'镜头');click(d.querySelector('.shot-card button[aria-label^="编辑"]'),'编辑');await until(()=>d.querySelector('#shot-editor-title'),'抽屉');d.querySelector('#shot-editor-title').textContent='LongUnbrokenShotPurpose'.repeat(20);}});
+async function openProjectAt(doc,index) {
+  // 骨架卡片没有文字也点不开，必须先等到真实卡片出现。
+  await until(()=>projectCards(doc).length>index,'真实项目卡片足够多');
+  const card=projectCards(doc)[index];
+  const title=(card.querySelector('strong')?.textContent||card.textContent||'').trim().slice(0,30);
+  click(card,`第 ${index+1} 个项目（${title}）`);
+  try {
+    await until(()=>doc.querySelector('.workspace-nav'),'工作台导航');
+  } catch (error) {
+    throw Error(`${error.message} —— 第 ${index+1} 个项目（${title}）没有打开工作台`);
+  }
+}
+function setSelect(select,value) {
+  const win=select.ownerDocument.defaultView;
+  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype,'value').set.call(select,value);
+  select.dispatchEvent(new win.Event('change',{bubbles:true}));
+}
+/** 逐个项目查找含指定元素的那个：数据顺序变了也不会误报成通过。 */
+async function openProjectWithRow(doc,navLabel,selector,label) {
+  await until(()=>projectCards(doc).length>0,'至少一个项目');
+  const total=projectCards(doc).length;
+  for(let i=0;i<total;i++) {
+    await openProjectAt(doc,i);
+    click(doc.querySelector(`.workspace-nav button[aria-label="${navLabel}"]`),navLabel);
+    await until(()=>doc.querySelector('.workspace-nav [aria-current="page"]')?.getAttribute('aria-label')===navLabel,`工作台 ${navLabel}`);
+    await sleep(400);
+    if(doc.querySelector(selector)) return;
+    click(doc.querySelector('.back-projects'),'返回所有项目');
+    await until(()=>projectCards(doc).length>0,'项目列表');
+  }
+  throw Error(`没有找到${label}的项目（夹具缺失）`);
+}
+SCENARIOS.push({name:'任务中心·等待审核',run:async d=>{await openProjectWithRow(d,'任务中心','.task-row.task-paused','带等待审核任务');const select=d.querySelector('.task-toolbar select');setSelect(select,'paused');await sleep(200);await until(()=>d.querySelector('.task-row.task-paused'),'筛选后仍有暂停任务');}});
+// 真实失败态：夹具项目里有一个 demo 视频 provider 如实失败产生的任务。
+SCENARIOS.push({name:'任务中心·真实失败任务',run:async d=>{await openProjectWithRow(d,'任务中心','.status-chip.failed','带失败任务');const error=d.querySelector('.task-detail p.task-error');if(!error) throw Error('失败任务没有渲染出错误原因块');const retry=[...d.querySelectorAll('.task-row button')].find(b=>b.textContent.includes('重试'));if(!retry) throw Error('失败任务没有重试按钮');}});
+// 最近导出：夹具项目里有真实失败的导出。不只检查列表，还要点进去打开真实的失败结果。
+SCENARIOS.push({name:'导出·最近导出（含失败）',run:async d=>{await openProjectWithRow(d,'导出','.export-history','有导出记录');
+  const failed=d.querySelector('.export-history li.failed');
+  if(!failed) throw Error('最近导出里没有标出失败的那次');
+  const shown=failed.querySelector('.export-history-body p');
+  if(!shown||!shown.textContent.trim()) throw Error('失败的导出没有显示原因');
+  if(!/SHA-256/.test(shown.textContent)) throw Error('失败原因不是后端给出的真实原因');
+  // 失败记录必须显示「用户请求的格式」，不能因为失败就退回 auto。
+  const formatText=failed.querySelector('.export-history-body strong')?.textContent||'';
+  if(!/通用草稿包/.test(formatText)) throw Error(`失败导出显示的格式不对：${formatText}`);
+  // 点「查看」应当打开那次失败的结果区，并用后端的错误渲染。
+  click(failed.querySelector('button'),'查看失败导出');
+  await until(()=>d.querySelector('.export-result header.failed'),'失败结果区');
+  const heading=d.querySelector('.export-result header h2')?.textContent||'';
+  if(!/SHA-256/.test(heading)) throw Error(`失败结果区没有显示后端错误：${heading}`);}});
+SCENARIOS.push({name:'任务中心·已完成筛选',run:async d=>{await workspace(d,'任务中心');await until(()=>d.querySelector('.task-toolbar'),'任务工具栏');setSelect(d.querySelector('.task-toolbar select'),'completed');await sleep(200);await until(()=>d.querySelector('.task-row'),'已完成任务行');}});
+SCENARIOS.push({name:'任务中心·长错误文案',run:async d=>{await workspace(d,'任务中心');await until(()=>d.querySelector('.task-detail p'),'任务行');const p=d.querySelector('.task-detail p');p.className='task-error';p.textContent='上游返回 500：'+'UnbrokenErrorToken'.repeat(40)+' '+'很长的中文错误说明'.repeat(30);}});
+// 后端不可达时的界面：**只在 offline=1 时注册**。后端正常时它注定失败，放进默认场景表会让
+// 每次全量检查都变红——这类场景必须由调用方显式开启。
+// ``expectText`` 用来证明提示里的地址来自配置而不是写死的常量。
+if (query.get('offline') === '1') SCENARIOS.push({name:'首页·后端不可用',run:async d=>{await until(()=>d.querySelector('.connection-error'),'连接失败提示');const message=d.querySelector('.connection-error small');if(!message||!message.textContent.trim()) throw Error('连接失败没有给出可读原因');const text=message.textContent;
+  if(!/start-vmaker\.bat/.test(text)) throw Error('连接失败提示没有告诉用户怎么启动后端');
+  const expected=query.get('expectText');
+  if(expected&&!text.includes(expected)) throw Error(`连接失败提示里没有出现实际配置的地址 ${expected}`);}});
+function describe(el) {return `${el.tagName.toLowerCase()}.${typeof el.className==='string'?el.className:''} "${(el.textContent||'').trim().slice(0,32)}"`;}
+function intersection(a,b) {return {x:Math.min(a.right,b.right)-Math.max(a.left,b.left),y:Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top)};}
+// Intersect with the viewport and each ancestor's actual clipping axis. A scroller
+// does not exempt its descendants: their remaining visible portions are still compared.
+function paintedRect(el, rect=el.getBoundingClientRect()) {
+  const win=el.ownerDocument.defaultView;
+  const out={left:Math.max(0,rect.left),top:Math.max(0,rect.top),right:Math.min(win.innerWidth,rect.right),bottom:Math.min(win.innerHeight,rect.bottom)};
+  for(let p=el.parentElement;p;p=p.parentElement) {
+    const s=win.getComputedStyle(p),r=p.getBoundingClientRect();
+    // client box excludes borders and scrollbars. Scaling accounts for CSS zoom.
+    const sx=p.offsetWidth?r.width/p.offsetWidth:1,sy=p.offsetHeight?r.height/p.offsetHeight:1;
+    const left=r.left+p.clientLeft*sx,top=r.top+p.clientTop*sy;
+    if(['hidden','auto','scroll','clip'].includes(s.overflowX)) {out.left=Math.max(out.left,left);out.right=Math.min(out.right,left+p.clientWidth*sx);}
+    if(['hidden','auto','scroll','clip'].includes(s.overflowY)) {out.top=Math.max(out.top,top);out.bottom=Math.min(out.bottom,top+p.clientHeight*sy);}
+  }
+  return out.right>out.left && out.bottom>out.top ? out : null;
+}
+function findProblems(win,doc) {
+  const issues=[];
+  const overlays=[...doc.querySelectorAll('.modal-backdrop,.drawer-backdrop')].filter(visible);
+  const scope=overlays.at(-1)||doc.body;
+  const nodes=[...scope.querySelectorAll('*')].filter(visible);
+  const add=(kind,detail)=>issues.push({kind,detail});
+  // No blanket overflow:auto/hidden exemption: measure actual clipping of actionable controls.
+  const buttons=nodes.filter(n=>n.matches('button,a[href],input,select,textarea'));
+  for(const el of buttons) {
+    const r=el.getBoundingClientRect();
+    if((r.left < -1 || r.right > win.innerWidth+1) && !horizontalReachable(el)) add('control-viewport',describe(el));
+    if(overlays.length && (r.top < -1 || r.bottom > win.innerHeight+1) && !scrollReachable(el)) add('control-vertical',describe(el));
+    for(let p=el.parentElement;p && p!==doc.body;p=p.parentElement) {
+      const s=win.getComputedStyle(p),pr=p.getBoundingClientRect();
+      if(['hidden','clip'].includes(s.overflowX)&&(r.left<pr.left-1||r.right>pr.right+1)) add('control-clipped-x',describe(el));
+      if(['hidden','clip'].includes(s.overflowY)&&(r.top<pr.top-1||r.bottom>pr.bottom+1)&&!scrollReachable(el,p)) add('control-clipped-y',describe(el));
+    }
+  }
+  // Compare controls across parents. DOM containment is excluded, NOT geometric containment.
+  for(let i=0;i<buttons.length;i++) for(let j=i+1;j<buttons.length;j++) {
+    const a=buttons[i],b=buttons[j]; if(a.contains(b)||b.contains(a)) continue;
+    const ar=paintedRect(a),br=paintedRect(b);if(!ar||!br) continue;
+    const overlap=intersection(ar,br);
+    if(overlap.x>2&&overlap.y>2) add('control-overlap',`${describe(a)} ↔ ${describe(b)} (${overlap.x.toFixed(1)}×${overlap.y.toFixed(1)})`);
+  }
+  for(const button of buttons.filter(n=>n.tagName==='BUTTON'||n.tagName==='A')) {
+    const box=button.getBoundingClientRect(), parts=[];
+    const walker=doc.createTreeWalker(button,win.NodeFilter.SHOW_TEXT);
+    while(walker.nextNode()) {
+      const text=walker.currentNode;if(!text.textContent.trim()||!visible(text.parentElement)) continue;
+      const range=doc.createRange();range.selectNodeContents(text);
+      for(const rect of range.getClientRects()) parts.push({rect,label:'text',owner:text});
+    }
+    for(const icon of button.querySelectorAll('svg,img')) if(visible(icon)) parts.push({rect:icon.getBoundingClientRect(),label:'icon',owner:icon});
+    for(const part of parts) if(part.rect.left<box.left-1||part.rect.right>box.right+1||part.rect.top<box.top-1||part.rect.bottom>box.bottom+1) add('button-content-overflow',`${describe(button)} ${part.label}`);
+    for(let i=0;i<parts.length;i++) for(let j=i+1;j<parts.length;j++) {
+      if(parts[i].owner===parts[j].owner) continue;
+      const ar=paintedRect(parts[i].owner.nodeType===3?parts[i].owner.parentElement:parts[i].owner,parts[i].rect);
+      const br=paintedRect(parts[j].owner.nodeType===3?parts[j].owner.parentElement:parts[j].owner,parts[j].rect);
+      if(!ar||!br) continue;
+      const o=intersection(ar,br);
+      if(o.x>2&&o.y>2) add('button-content-overlap',`${describe(button)} ${parts[i].label}/${parts[j].label}`);
+    }
+  }
+  if(doc.documentElement.scrollWidth>win.innerWidth+1) add('page-horizontal-scroll',`${doc.documentElement.scrollWidth} > ${win.innerWidth}`);
+  return issues;
+}
+async function auditPositions(win,doc) {
+  const issues=findProblems(win,doc), positions=[];
+  const overlays=[...doc.querySelectorAll('.modal-backdrop,.drawer-backdrop')].filter(visible);
+  const scope=overlays.at(-1)||doc.body;
+  for(const el of [...scope.querySelectorAll('button,a[href]')].filter(visible)) {
+    el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
+    await sleep(5);
+    const rect=paintedRect(el);
+    if(!rect) {issues.push({kind:'unreachable',detail:describe(el)});continue;}
+    const x=(rect.left+rect.right)/2,y=(rect.top+rect.bottom)/2;
+    const hit=doc.elementFromPoint(x,y);
+    positions.push({label:el.getAttribute('aria-label')||el.textContent.trim(),x:Math.round(x),y:Math.round(y),width:Math.round(rect.right-rect.left),height:Math.round(rect.bottom-rect.top),disabled:Boolean(el.disabled),hit:el===hit||el.contains(hit)});
+    if(hit!==el&&!el.contains(hit)) issues.push({kind:'control-obscured',detail:`${describe(el)} covered by ${hit?describe(hit):'nothing'}`});
+  }
+  return {issues,positions};
+}
+function horizontalReachable(el) {
+  for(let p=el.parentElement;p;p=p.parentElement) {
+    const s=p.ownerDocument.defaultView.getComputedStyle(p);
+    if(['auto','scroll'].includes(s.overflowX)&&p.scrollWidth>p.clientWidth) return true;
+  }
+  return false;
+}
+function scrollReachable(el,stop) {
+  for(let p=el.parentElement;p&&p!==stop;p=p.parentElement) {
+    const s=p.ownerDocument.defaultView.getComputedStyle(p);
+    if(['auto','scroll'].includes(s.overflowY)&&p.scrollHeight>p.clientHeight) return true;
+  }
+  return false;
+}
+function publish(result) {
+  window.__UI_PROBE_RESULT__=result;
+  let node=document.getElementById('probe-result');if(!node){node=document.createElement('script');node.id='probe-result';node.type='application/json';document.body.append(node);}
+  node.textContent=JSON.stringify(result);
+  document.getElementById('report').textContent=result.cases.map(c=>`[${c.status==='passed'?'正常':'问题'}] ${c.width}x${c.height} · ${c.scenario}\n${c.issues.map(i=>'  '+i.kind+': '+i.detail).join('\n')}`).join('\n')+`\n=== ${result.status} (${result.cases.length} cases) ===`;
+}
+async function warmUp() {
+  // 第一个 iframe 是冷启动：生产包要下载执行、后端请求也要跑一轮，很容易超过单个用例的等待上限。
+  // 先加载一次并丢掉结果，让后面的用例都不是冷启动，避免偶发红。
+  const frame=document.createElement('iframe');frame.width=760;frame.height=760;frame.src='/';
+  const loaded=new Promise((resolve)=>{frame.onload=resolve;setTimeout(resolve,20000);});
+  document.getElementById('stage').append(frame);
+  await loaded;
+  const doc=frame.contentDocument;
+  if(doc){ try{ await until(()=>doc.querySelector('button'),'warm-up mounted',20000); }catch{} }
+  frame.remove();
+}
+async function run() {
+  const names=query.get('scenarios')?.split(',');
+  if(names?.some(name=>!SCENARIOS.some(s=>s.name===name))) throw Error('Unknown scenario name');
+  const selected=SCENARIOS.filter(s=>!names||names.includes(s.name));
+  const result={status:'running',experimentalCssZoom:ZOOM!==1,cases:[],limitations:['CSS zoom is experimental, not browser zoom; acceptance runs must use zoom=1','No screenshot inspection','Existing first project; project data branches are not exhaustively covered','Each visible button/link is scrolled into view and center hit-tested; disabled controls are measured but not activated','Not all loading/error/task status branches or screenshot aesthetics are covered']};
+  await warmUp();
+  for(const width of WIDTHS) for(const height of HEIGHTS) for(const scenario of selected) {
+    const frame=document.createElement('iframe');frame.width=width;frame.height=height;
+    const entry={width,height,scenario:scenario.name,status:'failed',issues:[]};
+    try {
+      const loaded=new Promise((resolve,reject)=>{frame.onload=resolve;setTimeout(()=>reject(Error('iframe load timeout')),12000);});
+      frame.src='/';document.getElementById('stage').append(frame);await loaded;
+      const doc=frame.contentDocument,win=frame.contentWindow;
+      if(!doc) throw Error('无法访问同源文档');
+      await until(()=>doc.querySelector('button'),'React mounted');
+      doc.documentElement.style.zoom=String(ZOOM);
+      entry.zoom=ZOOM;
+      await scenario.run(doc);
+      await doc.fonts.ready;await sleep(350);
+      entry.actualTitle=doc.querySelector('.wizard-page h3')?.textContent||doc.querySelector('.workspace-nav [aria-current]')?.getAttribute('aria-label')||doc.querySelector('[role="dialog"] h2')?.textContent||'首页';
+      const audit=await auditPositions(win,doc);entry.issues=audit.issues;entry.buttons=audit.positions;entry.status=entry.issues.length?'failed':'passed';
+    } catch(error) {entry.issues.push({kind:'scenario-failed',detail:String(error.message||error)});}
+    finally {frame.remove();}
+    result.cases.push(entry);publish(result);
+  }
+  result.status=result.cases.some(c=>c.status!=='passed')?'failed':'passed';publish(result);
+}
+run().catch(error=>publish({status:'failed',cases:[{scenario:'probe configuration',status:'failed',issues:[{kind:'fatal',detail:String(error)}]}]}));
+</script></body></html>
